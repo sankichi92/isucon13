@@ -2,7 +2,7 @@ package 'jq'
 package 'fish'
 package 'neovim'
 package 'unzip'
-package 'redis'
+#package 'redis'
 package 'sysstat'
 
 directory '/home/isucon/.config/fish' do
