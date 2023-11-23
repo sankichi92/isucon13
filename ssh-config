@@ -1,0 +1,11 @@
+Host isu1
+  HostName x.x.x.x
+  User isucon
+
+Host isu2
+  HostName y.y.y.y
+  User isucon
+
+Host isu3
+  HostName z.z.z.z
+  User isucon
