@@ -12,8 +12,8 @@ discord "deploy(default.sh): start"
 
 isu_hosts=(
   "isu1"
-  #"isu2"
-  #"isu3"
+  "isu2"
+  "isu3"
 )
 
 for host in "${isu_hosts[@]}" ; do
