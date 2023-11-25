@@ -19,6 +19,13 @@ remote_file '/home/isucon/webapp/sql/init.sh' do
   notifies :restart, 'service[isupipe-rust]'
 end
 
+remote_file '/home/isucon/webapp/sql/init.sh' do
+  user 'root'
+  mode '755'
+  source '../../../webapp/sql/init.sh'
+  notifies :restart, 'service[isupipe-rust]'
+end
+
 remote_file '/home/isucon/webapp/rust/target/x86_64-unknown-linux-gnu/release/isupipe' do
   user 'root'
   mode '755'
