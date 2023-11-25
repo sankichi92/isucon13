@@ -26,6 +26,11 @@ remote_file '/etc/systemd/system/isupipe-rust.service' do
   notifies :restart, 'service[isupipe-rust]'
 end
 
+directory '/var/icons' do
+  user 'root'
+  owner 'isucon'
+  mode '755'
+end
 # それぞれのホストで変更した方が柔軟説
 #remote_file '/home/isucon/env.sh' do
 #  user 'isucon'

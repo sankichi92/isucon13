@@ -13,9 +13,6 @@ use std::sync::Arc;
 use tokio::fs;
 use uuid::Uuid;
 
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-
 const DEFAULT_SESSION_ID_KEY: &str = "SESSIONID";
 const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
 const DEFAULT_USER_ID_KEY: &str = "USERID";
@@ -142,11 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info,tower_http=debug,axum::rejection=trace");
     }
-    // tracing_subscriber::fmt::init();
-    let tokio_console_layer = console_subscriber::spawn();
-    tracing_subscriber::registry()
-        .with(tokio_console_layer)
-        .init();
+    tracing_subscriber::fmt::init();
 
     let pool = sqlx::mysql::MySqlPoolOptions::new()
         .connect_with(build_mysql_options())
@@ -1539,9 +1532,17 @@ async fn post_icon_handler(
         .await?
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
-
     state.post_image(user_id, req.image).await?;
-    Ok((StatusCode::CREATED, axum::Json(PostIconResponse { id: 0 })))
+    let rs = sqlx::query("INSERT INTO icons (user_id) VALUES (?)")
+        .bind(user_id)
+        .execute(&state.pool)
+        .await?;
+    let icon_id = rs.last_insert_id() as i64;
+
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(PostIconResponse { id: icon_id }),
+    ))
 }
 
 async fn get_me_handler(
