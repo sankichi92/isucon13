@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[profile.release]
+panic = "abort"
+
 [dependencies]
 async-session = "3"
 axum = { version = "0.6", features = ["headers", "tracing"] }
