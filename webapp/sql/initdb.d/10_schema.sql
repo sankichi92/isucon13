@@ -104,6 +104,8 @@ CREATE TABLE `ng_words` (
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 CREATE INDEX ng_words_word ON ng_words(`word`);
 
+CREATE INDEX ng_words_livestream_id_user_id ON ng_words (`livestream_id`, `user_id`);
+
 -- ライブ配信に対するリアクション
 CREATE TABLE `reactions` (
   `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
