@@ -1886,21 +1886,19 @@ async fn get_user_statistics_handler(
     let mut ranking = Vec::new();
     for user in users {
         let query = r#"
-        SELECT COUNT(*) FROM users u
-        INNER JOIN livestreams l ON l.user_id = u.id
+        SELECT COUNT(*) FROM livestreams l
         INNER JOIN reactions r ON r.livestream_id = l.id
-        WHERE u.id = ?
+        WHERE l.user_id = ?
         "#;
         let MysqlDecimal(reactions) = sqlx::query_scalar(query)
             .bind(user.id)
             .fetch_one(&mut *tx)
             .await?;
 
-        let query = r#"
-        SELECT IFNULL(SUM(l2.tip), 0) FROM users u
-        INNER JOIN livestreams l ON l.user_id = u.id
+        let query: &str = r#"
+        SELECT IFNULL(SUM(l2.tip), 0) FROM livestreams l
         INNER JOIN livecomments l2 ON l2.livestream_id = l.id
-        WHERE u.id = ?
+        WHERE l.user_id = ?
         "#;
         let MysqlDecimal(tips) = sqlx::query_scalar(query)
             .bind(user.id)
@@ -1927,13 +1925,12 @@ async fn get_user_statistics_handler(
 
     // リアクション数
     let query = r"#
-    SELECT COUNT(*) FROM users u
-    INNER JOIN livestreams l ON l.user_id = u.id
+    SELECT COUNT(*) FROM livestreams l
     INNER JOIN reactions r ON r.livestream_id = l.id
-    WHERE u.name = ?
+    WHERE l.user_id = ?
     #";
     let MysqlDecimal(total_reactions) = sqlx::query_scalar(query)
-        .bind(&username)
+        .bind(&user.id)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -1974,16 +1971,15 @@ async fn get_user_statistics_handler(
     // お気に入り絵文字
     let query = r#"
     SELECT r.emoji_name
-    FROM users u
-    INNER JOIN livestreams l ON l.user_id = u.id
+    FROM livestreams l
     INNER JOIN reactions r ON r.livestream_id = l.id
-    WHERE u.name = ?
+    WHERE l.user_id = ?
     GROUP BY emoji_name
     ORDER BY COUNT(*) DESC, emoji_name DESC
     LIMIT 1
     "#;
     let favorite_emoji: String = sqlx::query_scalar(query)
-        .bind(&username)
+        .bind(&user.id)
         .fetch_optional(&mut *tx)
         .await?
         .unwrap_or_default();
