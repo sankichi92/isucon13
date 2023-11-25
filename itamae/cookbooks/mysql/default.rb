@@ -4,25 +4,14 @@ end
 
 remote_directory '/etc/mysql/conf.d' do
   user 'root'
-  mode '755'
-  notifies :reload, 'service[mariadb]'
+  mode '644'
+  notifies :reload, 'service[mysql]'
 end
 
-remote_file '/etc/mysql/mariadb.cnf' do
-  user 'root'
-  mode '755'
-  notifies :reload, 'service[mariadb]'
-end
-
-remote_directory '/etc/mysql/mariadb.conf.d' do
-  user 'root'
-  mode '755'
-  notifies :reload, 'service[mariadb]'
-end
-
-remote_file '/etc/nginx/sites-available/isucondition.conf' do
+remote_directory '/etc/mysql/mysql.conf.d' do
   user 'root'
   mode '644'
-  notifies :reload, 'service[nginx]'
+  notifies :reload, 'service[mysql]'
 end
+
 

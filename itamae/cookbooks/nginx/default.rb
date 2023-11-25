@@ -8,3 +8,8 @@ remote_file '/etc/nginx/nginx.conf' do
   notifies :reload, 'service[nginx]'
 end
 
+remote_directory '/etc/nginx/sites-enabled' do
+  user 'root'
+  mode '644'
+  notifies :reload, 'service[nginx]'
+end
