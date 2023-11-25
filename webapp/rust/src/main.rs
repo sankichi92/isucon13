@@ -120,10 +120,13 @@ fn build_mysql_options() -> sqlx::mysql::MySqlConnectOptions {
     options
 }
 
-async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
+async fn initialize_handler(
+    State(state): State<AppState>,
+) -> Result<axum::Json<InitializeResponse>, Error> {
     let output = tokio::process::Command::new("../sql/init.sh")
         .output()
         .await?;
+    state.icon_hash_cache.invalidate_all();
     if !output.status.success() {
         return Err(Error::InternalServerError(format!(
             "init.sh failed with stdout={} stderr={}",
@@ -1551,8 +1554,8 @@ async fn post_icon_handler(
         .await?
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
-    state.post_image(user_id, req.image).await?;
     let mut tx = state.pool.begin().await?;
+    state.post_image(user_id, req.image).await?;
     sqlx::query("DELETE FROM icons WHERE user_id = ?")
         .bind(user_id)
         .execute(&mut *tx)
