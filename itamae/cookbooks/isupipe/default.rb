@@ -47,7 +47,11 @@ directory '/var/icons' do
   mode '755'
 end
 # それぞれのホストで変更した方が柔軟説
-#remote_file '/home/isucon/env.sh' do
-#  user 'isucon'
-#  mode '644'
-#end
+remote_file '/home/isucon/env.sh' do
+ user 'isucon'
+ owner 'isucon'
+ group 'isucon'
+ mode '755'
+
+ notifies :restart, 'service[isupipe-rust]'
+end
