@@ -19,7 +19,6 @@ axum-extra = { version = "0.8", features = [
 base64 = "0.21"
 bcrypt = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
-console-subscriber = "0.2.0"
 digest = "0.10.7"
 hex = "0.4.3"
 hyper = "0.14"
