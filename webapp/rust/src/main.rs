@@ -79,6 +79,7 @@ struct AppState {
     powerdns_subdomain_address: Arc<String>,
     icon_dir: PathBuf,
     icon_hash_cache: moka::future::Cache<i64, GenericArray<u8, typenum::consts::U32>>,
+    default_icon: (Vec<u8>, GenericArray<u8, typenum::consts::U32>),
 }
 impl axum::extract::FromRef<AppState> for axum_extra::extract::cookie::Key {
     fn from_ref(state: &AppState) -> Self {
@@ -136,6 +137,7 @@ async fn initialize_handler() -> Result<axum::Json<InitializeResponse>, Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use digest::Digest;
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info,tower_http=debug,axum::rejection=trace");
     }
@@ -160,6 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             POWERDNS_SUBDOMAIN_ADDRESS_ENV_KEY
         );
     };
+
+    let fallback_iamge = fs::read(FALLBACK_IMAGE).await?;
 
     let app = axum::Router::new()
         // 初期化
@@ -263,6 +267,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pool,
             key: axum_extra::extract::cookie::Key::derive_from(&secret),
             powerdns_subdomain_address: Arc::new(powerdns_subdomain_address),
+            default_icon: (
+                fallback_iamge.clone(),
+                sha2::Sha256::digest(&fallback_iamge),
+            ),
         })
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -1475,24 +1483,35 @@ impl AppState {
         if let Some(hash_cache) = self.icon_hash_cache.get(&user_id).await {
             &hash_cache[..] == hash
         } else {
-            let (_, hash_local) = self.get_image(user_id).await;
-            &hash_local[..] == hash
+            let (_, hash_local, fallbacked) = self.get_image(user_id).await;
+            !fallbacked && &hash_local[..] == hash
         }
     }
-    async fn get_image(&self, user_id: i64) -> (Vec<u8>, GenericArray<u8, typenum::consts::U32>) {
+
+    async fn get_icon_hash(&self, user_id: i64) -> GenericArray<u8, typenum::consts::U32> {
+        if let Some(hash_cache) = self.icon_hash_cache.get(&user_id).await {
+            hash_cache
+        } else {
+            let (_, hash_local, _) = self.get_image(user_id).await;
+            hash_local
+        }
+    }
+
+    async fn get_image(
+        &self,
+        user_id: i64,
+    ) -> (Vec<u8>, GenericArray<u8, typenum::consts::U32>, bool) {
         use digest::Digest;
         let image = fs::read(self.icon_dir.join(user_id.to_string())).await.ok();
-        let image = if let Some(image) = image {
-            image
+        if let Some(image) = image {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&image);
+            let hash = hasher.finalize();
+            self.icon_hash_cache.insert(user_id, hash).await;
+            (image, hash, false)
         } else {
-            let image = fs::read(FALLBACK_IMAGE).await.unwrap();
-            image
-        };
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&image);
-        let hash = hasher.finalize();
-        self.icon_hash_cache.insert(user_id, hash).await;
-        (image, hash)
+            (self.default_icon.0.clone(), self.default_icon.1, true)
+        }
     }
 }
 
@@ -1515,7 +1534,7 @@ async fn get_icon_handler(
             return Ok((StatusCode::NOT_MODIFIED, headers, Vec::new()));
         }
     }
-    let (icon, _) = state.get_image(user.id).await;
+    let (icon, _, _) = state.get_image(user.id).await;
     Ok((StatusCode::OK, headers, icon))
 }
 
@@ -1533,11 +1552,17 @@ async fn post_icon_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
     state.post_image(user_id, req.image).await?;
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("DELETE FROM icons WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
     let rs = sqlx::query("INSERT INTO icons (user_id) VALUES (?)")
         .bind(user_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     let icon_id = rs.last_insert_id() as i64;
+    tx.commit().await?;
 
     Ok((
         StatusCode::CREATED,
@@ -1748,7 +1773,7 @@ async fn fill_user_response(
         .fetch_one(&mut *tx)
         .await?;
 
-    let (_, hash) = state.get_image(user_model.id).await;
+    let hash = state.get_icon_hash(user_model.id).await;
 
     Ok(User {
         id: user_model.id,
