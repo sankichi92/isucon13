@@ -36,6 +36,7 @@ end
 directory '/var/icons' do
   user 'root'
   owner 'isucon'
+  group 'isucon'
   mode '755'
 end
 # それぞれのホストで変更した方が柔軟説
