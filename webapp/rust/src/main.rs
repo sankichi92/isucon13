@@ -1,11 +1,16 @@
 use async_session::{CookieStore, SessionStore};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum_extra::extract::cookie::SignedCookieJar;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use digest::generic_array::GenericArray;
+use hyper::HeaderMap;
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::fs;
 use uuid::Uuid;
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -75,6 +80,8 @@ struct AppState {
     pool: MySqlPool,
     key: axum_extra::extract::cookie::Key,
     powerdns_subdomain_address: Arc<String>,
+    icon_dir: PathBuf,
+    icon_hash_cache: moka::future::Cache<i64, GenericArray<u8, typenum::consts::U32>>,
 }
 impl axum::extract::FromRef<AppState> for axum_extra::extract::cookie::Key {
     fn from_ref(state: &AppState) -> Self {
@@ -258,6 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 課金情報
         .route("/api/payment", axum::routing::get(get_payment_result))
         .with_state(AppState {
+            icon_dir: PathBuf::from("/var/icons"),
+            icon_hash_cache: moka::future::Cache::new(1024),
             pool,
             key: axum_extra::extract::cookie::Key::derive_from(&secret),
             powerdns_subdomain_address: Arc::new(powerdns_subdomain_address),
@@ -401,7 +410,7 @@ struct ReservationSlotModel {
 }
 
 async fn reserve_livestream_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     axum::Json(req): axum::Json<ReserveLivestreamRequest>,
 ) -> Result<(StatusCode, axum::Json<Livestream>), Error> {
@@ -418,7 +427,7 @@ async fn reserve_livestream_handler(
         .ok_or(Error::SessionError)?;
     let user_id = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     // 2023/11/25 10:00からの１年間の期間内であるかチェック
     let term_start_at = Utc.from_utc_datetime(
@@ -508,6 +517,7 @@ async fn reserve_livestream_handler(
     }
 
     let livestream = fill_livestream_response(
+        &state,
         &mut tx,
         LivestreamModel {
             id: livestream_id,
@@ -536,13 +546,13 @@ struct SearchLivestreamsQuery {
 }
 
 async fn search_livestreams_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     Query(SearchLivestreamsQuery {
         tag: key_tag_name,
         limit,
     }): Query<SearchLivestreamsQuery>,
 ) -> Result<axum::Json<Vec<Livestream>>, Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let livestream_models: Vec<LivestreamModel> = if key_tag_name.is_empty() {
         // 検索条件なし
@@ -585,7 +595,7 @@ async fn search_livestreams_handler(
 
     let mut livestreams = Vec::with_capacity(livestream_models.len());
     for livestream_model in livestream_models {
-        let livestream = fill_livestream_response(&mut tx, livestream_model).await?;
+        let livestream = fill_livestream_response(&state, &mut tx, livestream_model).await?;
         livestreams.push(livestream);
     }
 
@@ -595,7 +605,7 @@ async fn search_livestreams_handler(
 }
 
 async fn get_my_livestreams_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
 ) -> Result<axum::Json<Vec<Livestream>>, Error> {
     verify_user_session(&jar).await?;
@@ -607,7 +617,7 @@ async fn get_my_livestreams_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let livestream_models: Vec<LivestreamModel> =
         sqlx::query_as("SELECT * FROM livestreams WHERE user_id = ?")
@@ -616,7 +626,7 @@ async fn get_my_livestreams_handler(
             .await?;
     let mut livestreams = Vec::with_capacity(livestream_models.len());
     for livestream_model in livestream_models {
-        let livestream = fill_livestream_response(&mut tx, livestream_model).await?;
+        let livestream = fill_livestream_response(&state, &mut tx, livestream_model).await?;
         livestreams.push(livestream);
     }
 
@@ -626,13 +636,13 @@ async fn get_my_livestreams_handler(
 }
 
 async fn get_user_livestreams_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((username,)): Path<(String,)>,
 ) -> Result<axum::Json<Vec<Livestream>>, Error> {
     verify_user_session(&jar).await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
         .bind(username)
@@ -647,7 +657,7 @@ async fn get_user_livestreams_handler(
             .await?;
     let mut livestreams = Vec::with_capacity(livestream_models.len());
     for livestream_model in livestream_models {
-        let livestream = fill_livestream_response(&mut tx, livestream_model).await?;
+        let livestream = fill_livestream_response(&state, &mut tx, livestream_model).await?;
         livestreams.push(livestream);
     }
 
@@ -716,13 +726,13 @@ async fn exit_livestream_handler(
 }
 
 async fn get_livestream_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
 ) -> Result<axum::Json<Livestream>, Error> {
     verify_user_session(&jar).await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let livestream_model: LivestreamModel =
         sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
@@ -733,7 +743,7 @@ async fn get_livestream_handler(
                 "not found livestream that has the given id".into(),
             ))?;
 
-    let livestream = fill_livestream_response(&mut tx, livestream_model).await?;
+    let livestream = fill_livestream_response(&state, &mut tx, livestream_model).await?;
 
     tx.commit().await?;
 
@@ -741,7 +751,7 @@ async fn get_livestream_handler(
 }
 
 async fn get_livecomment_reports_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
 ) -> Result<axum::Json<Vec<LivecommentReport>>, Error> {
@@ -754,7 +764,7 @@ async fn get_livecomment_reports_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let livestream_model: LivestreamModel =
         sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
@@ -776,7 +786,7 @@ async fn get_livecomment_reports_handler(
 
     let mut reports = Vec::with_capacity(report_models.len());
     for report_model in report_models {
-        let report = fill_livecomment_report_response(&mut tx, report_model).await?;
+        let report = fill_livecomment_report_response(&state, &mut tx, report_model).await?;
         reports.push(report);
     }
 
@@ -786,6 +796,7 @@ async fn get_livecomment_reports_handler(
 }
 
 async fn fill_livestream_response(
+    state: &AppState,
     tx: &mut MySqlConnection,
     livestream_model: LivestreamModel,
 ) -> sqlx::Result<Livestream> {
@@ -793,7 +804,7 @@ async fn fill_livestream_response(
         .bind(livestream_model.user_id)
         .fetch_one(&mut *tx)
         .await?;
-    let owner = fill_user_response(tx, owner_model).await?;
+    let owner = fill_user_response(&state, tx, owner_model).await?;
 
     let livestream_tag_models: Vec<LivestreamTagModel> =
         sqlx::query_as("SELECT * FROM livestream_tags WHERE livestream_id = ?")
@@ -892,14 +903,14 @@ struct GetLivecommentsQuery {
 }
 
 async fn get_livecomments_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
     Query(GetLivecommentsQuery { limit }): Query<GetLivecommentsQuery>,
 ) -> Result<axum::Json<Vec<Livecomment>>, Error> {
     verify_user_session(&jar).await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let mut query =
         "SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC".to_owned();
@@ -915,7 +926,7 @@ async fn get_livecomments_handler(
 
     let mut livecomments = Vec::with_capacity(livecomment_models.len());
     for livecomment_model in livecomment_models {
-        let livecomment = fill_livecomment_response(&mut tx, livecomment_model).await?;
+        let livecomment = fill_livecomment_response(&state, &mut tx, livecomment_model).await?;
         livecomments.push(livecomment);
     }
 
@@ -954,7 +965,7 @@ async fn get_ngwords(
 }
 
 async fn post_livecomment_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
     axum::Json(req): axum::Json<PostLivecommentRequest>,
@@ -968,7 +979,7 @@ async fn post_livecomment_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let livestream_model: LivestreamModel =
         sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
@@ -1021,6 +1032,7 @@ async fn post_livecomment_handler(
     let livecomment_id = rs.last_insert_id() as i64;
 
     let livecomment = fill_livecomment_response(
+        &state,
         &mut tx,
         LivecommentModel {
             id: livecomment_id,
@@ -1039,7 +1051,7 @@ async fn post_livecomment_handler(
 }
 
 async fn report_livecomment_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id, livecomment_id)): Path<(i64, i64)>,
 ) -> Result<(StatusCode, axum::Json<LivecommentReport>), Error> {
@@ -1052,7 +1064,7 @@ async fn report_livecomment_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let _: LivestreamModel = sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
         .bind(livestream_id)
@@ -1079,6 +1091,7 @@ async fn report_livecomment_handler(
     let report_id = rs.last_insert_id() as i64;
 
     let report = fill_livecomment_report_response(
+        &state,
         &mut tx,
         LivecommentReportModel {
             id: report_id,
@@ -1187,6 +1200,7 @@ async fn moderate_handler(
 }
 
 async fn fill_livecomment_response(
+    state: &AppState,
     tx: &mut MySqlConnection,
     livecomment_model: LivecommentModel,
 ) -> sqlx::Result<Livecomment> {
@@ -1194,14 +1208,14 @@ async fn fill_livecomment_response(
         .bind(livecomment_model.user_id)
         .fetch_one(&mut *tx)
         .await?;
-    let comment_owner = fill_user_response(&mut *tx, comment_owner_model).await?;
+    let comment_owner = fill_user_response(&state, &mut *tx, comment_owner_model).await?;
 
     let livestream_model: LivestreamModel =
         sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
             .bind(livecomment_model.livestream_id)
             .fetch_one(&mut *tx)
             .await?;
-    let livestream = fill_livestream_response(&mut *tx, livestream_model).await?;
+    let livestream = fill_livestream_response(state, &mut *tx, livestream_model).await?;
 
     Ok(Livecomment {
         id: livecomment_model.id,
@@ -1214,6 +1228,7 @@ async fn fill_livecomment_response(
 }
 
 async fn fill_livecomment_report_response(
+    state: &AppState,
     tx: &mut MySqlConnection,
     report_model: LivecommentReportModel,
 ) -> sqlx::Result<LivecommentReport> {
@@ -1221,14 +1236,14 @@ async fn fill_livecomment_report_response(
         .bind(report_model.user_id)
         .fetch_one(&mut *tx)
         .await?;
-    let reporter = fill_user_response(&mut *tx, reporter_model).await?;
+    let reporter = fill_user_response(&state, &mut *tx, reporter_model).await?;
 
     let livecomment_model: LivecommentModel =
         sqlx::query_as("SELECT * FROM livecomments WHERE id = ?")
             .bind(report_model.livecomment_id)
             .fetch_one(&mut *tx)
             .await?;
-    let livecomment = fill_livecomment_response(&mut *tx, livecomment_model).await?;
+    let livecomment = fill_livecomment_response(state, &mut *tx, livecomment_model).await?;
 
     Ok(LivecommentReport {
         id: report_model.id,
@@ -1268,14 +1283,14 @@ struct GetReactionsQuery {
 }
 
 async fn get_reactions_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
     Query(GetReactionsQuery { limit }): Query<GetReactionsQuery>,
 ) -> Result<axum::Json<Vec<Reaction>>, Error> {
     verify_user_session(&jar).await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let mut query =
         "SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC".to_owned();
@@ -1291,7 +1306,7 @@ async fn get_reactions_handler(
 
     let mut reactions = Vec::with_capacity(reaction_models.len());
     for reaction_model in reaction_models {
-        let reaction = fill_reaction_response(&mut tx, reaction_model).await?;
+        let reaction = fill_reaction_response(&state, &mut tx, reaction_model).await?;
         reactions.push(reaction);
     }
 
@@ -1301,7 +1316,7 @@ async fn get_reactions_handler(
 }
 
 async fn post_reaction_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((livestream_id,)): Path<(i64,)>,
     axum::Json(req): axum::Json<PostReactionRequest>,
@@ -1315,7 +1330,7 @@ async fn post_reaction_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let created_at = Utc::now().timestamp();
     let result =
@@ -1329,6 +1344,7 @@ async fn post_reaction_handler(
     let reaction_id = result.last_insert_id() as i64;
 
     let reaction = fill_reaction_response(
+        &state,
         &mut tx,
         ReactionModel {
             id: reaction_id,
@@ -1346,6 +1362,7 @@ async fn post_reaction_handler(
 }
 
 async fn fill_reaction_response(
+    state: &AppState,
     tx: &mut MySqlConnection,
     reaction_model: ReactionModel,
 ) -> sqlx::Result<Reaction> {
@@ -1353,14 +1370,14 @@ async fn fill_reaction_response(
         .bind(reaction_model.user_id)
         .fetch_one(&mut *tx)
         .await?;
-    let user = fill_user_response(&mut *tx, user_model).await?;
+    let user = fill_user_response(state, &mut *tx, user_model).await?;
 
     let livestream_model: LivestreamModel =
         sqlx::query_as("SELECT * FROM livestreams WHERE id = ?")
             .bind(reaction_model.livestream_id)
             .fetch_one(&mut *tx)
             .await?;
-    let livestream = fill_livestream_response(&mut *tx, livestream_model).await?;
+    let livestream = fill_livestream_response(state, &mut *tx, livestream_model).await?;
 
     Ok(Reaction {
         id: reaction_model.id,
@@ -1451,38 +1468,66 @@ struct PostIconResponse {
     id: i64,
 }
 
-async fn get_icon_handler(
-    State(AppState { pool, .. }): State<AppState>,
-    Path((username,)): Path<(String,)>,
-) -> Result<axum::response::Response, Error> {
-    use axum::response::IntoResponse as _;
-
-    let mut tx = pool.begin().await?;
-
-    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
-        .bind(username)
-        .fetch_one(&mut *tx)
-        .await?;
-
-    let image: Option<Vec<u8>> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-    let headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
-    if let Some(image) = image {
-        Ok((headers, image).into_response())
-    } else {
-        let file = tokio::fs::File::open(FALLBACK_IMAGE).await.unwrap();
-        let stream = tokio_util::io::ReaderStream::new(file);
-        let body = axum::body::StreamBody::new(stream);
-
-        Ok((headers, body).into_response())
+impl AppState {
+    async fn post_image(&self, user_id: i64, icon: Vec<u8>) -> Result<(), Error> {
+        use digest::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&icon);
+        let hash = hasher.finalize();
+        fs::write(self.icon_dir.join(user_id.to_string()), &icon).await?;
+        self.icon_hash_cache.insert(user_id, hash).await;
+        Ok(())
+    }
+    async fn image_not_modified(&self, user_id: i64, hash: &[u8]) -> bool {
+        if let Some(hash_cache) = self.icon_hash_cache.get(&user_id).await {
+            &hash_cache[..] == hash
+        } else {
+            let (_, hash_local) = self.get_image(user_id).await;
+            &hash_local[..] == hash
+        }
+    }
+    async fn get_image(&self, user_id: i64) -> (Vec<u8>, GenericArray<u8, typenum::consts::U32>) {
+        use digest::Digest;
+        let image = fs::read(self.icon_dir.join(user_id.to_string())).await.ok();
+        let image = if let Some(image) = image {
+            image
+        } else {
+            let image = fs::read(FALLBACK_IMAGE).await.unwrap();
+            image
+        };
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&image);
+        let hash = hasher.finalize();
+        self.icon_hash_cache.insert(user_id, hash).await;
+        (image, hash)
     }
 }
 
+async fn get_icon_handler(
+    req_headers: HeaderMap,
+    State(state): State<AppState>,
+    Path((username,)): Path<(String,)>,
+) -> Result<impl IntoResponse, Error> {
+    let headers = [(axum::http::header::CONTENT_TYPE, "image/jpeg")];
+    let user: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
+        .bind(username)
+        .fetch_one(&state.pool)
+        .await?;
+
+    if let Some(req_hash) = req_headers.get("If-None-Match") {
+        if state
+            .image_not_modified(user.id, &hex::decode(req_hash).unwrap_or_default())
+            .await
+        {
+            return Ok((StatusCode::NOT_MODIFIED, headers, Vec::new()));
+        }
+    }
+    let (icon, _) = state.get_image(user.id).await;
+    Ok((StatusCode::OK, headers, icon))
+}
+
 async fn post_icon_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     axum::Json(req): axum::Json<PostIconRequest>,
 ) -> Result<(StatusCode, axum::Json<PostIconResponse>), Error> {
@@ -1495,30 +1540,12 @@ async fn post_icon_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
-
-    sqlx::query("DELETE FROM icons WHERE user_id = ?")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-
-    let rs = sqlx::query("INSERT INTO icons (user_id, image) VALUES (?, ?)")
-        .bind(user_id)
-        .bind(req.image)
-        .execute(&mut *tx)
-        .await?;
-    let icon_id = rs.last_insert_id() as i64;
-
-    tx.commit().await?;
-
-    Ok((
-        StatusCode::CREATED,
-        axum::Json(PostIconResponse { id: icon_id }),
-    ))
+    state.post_image(user_id, req.image).await?;
+    Ok((StatusCode::CREATED, axum::Json(PostIconResponse { id: 0 })))
 }
 
 async fn get_me_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
 ) -> Result<axum::Json<User>, Error> {
     verify_user_session(&jar).await?;
@@ -1530,7 +1557,7 @@ async fn get_me_handler(
         .ok_or(Error::SessionError)?;
     let user_id: i64 = sess.get(DEFAULT_USER_ID_KEY).ok_or(Error::SessionError)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE id = ?")
         .bind(user_id)
@@ -1540,7 +1567,7 @@ async fn get_me_handler(
             "not found user that has the userid in session".into(),
         ))?;
 
-    let user = fill_user_response(&mut tx, user_model).await?;
+    let user = fill_user_response(&state, &mut tx, user_model).await?;
 
     tx.commit().await?;
 
@@ -1550,11 +1577,7 @@ async fn get_me_handler(
 // ユーザ登録API
 // POST /api/register
 async fn register_handler(
-    State(AppState {
-        pool,
-        powerdns_subdomain_address,
-        ..
-    }): State<AppState>,
+    State(state): State<AppState>,
     axum::Json(req): axum::Json<PostUserRequest>,
 ) -> Result<(StatusCode, axum::Json<User>), Error> {
     if req.name == "pipe" {
@@ -1564,7 +1587,7 @@ async fn register_handler(
     const BCRYPT_DEFAULT_COST: u32 = 4;
     let hashed_password = bcrypt::hash(&req.password, BCRYPT_DEFAULT_COST)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let result = sqlx::query(
         "INSERT INTO users (name, display_name, description, password) VALUES(?, ?, ?, ?)",
@@ -1589,7 +1612,7 @@ async fn register_handler(
         .arg(&req.name)
         .arg("A")
         .arg("0")
-        .arg(&*powerdns_subdomain_address)
+        .arg(&*state.powerdns_subdomain_address)
         .output()
         .await?;
     if !output.status.success() {
@@ -1601,6 +1624,7 @@ async fn register_handler(
     }
 
     let user = fill_user_response(
+        &state,
         &mut tx,
         UserModel {
             id: user_id,
@@ -1672,13 +1696,13 @@ async fn login_handler(
 // ユーザ詳細API
 // GET /api/user/:username
 async fn get_user_handler(
-    State(AppState { pool, .. }): State<AppState>,
+    State(state): State<AppState>,
     jar: SignedCookieJar,
     Path((username,)): Path<(String,)>,
 ) -> Result<axum::Json<User>, Error> {
     verify_user_session(&jar).await?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = state.pool.begin().await?;
 
     let user_model: UserModel = sqlx::query_as("SELECT * FROM users WHERE name = ?")
         .bind(username)
@@ -1688,7 +1712,7 @@ async fn get_user_handler(
             "not found user that has the given username".into(),
         ))?;
 
-    let user = fill_user_response(&mut tx, user_model).await?;
+    let user = fill_user_response(&state, &mut tx, user_model).await?;
 
     tx.commit().await?;
 
@@ -1713,23 +1737,17 @@ async fn verify_user_session(jar: &SignedCookieJar) -> Result<(), Error> {
     Ok(())
 }
 
-async fn fill_user_response(tx: &mut MySqlConnection, user_model: UserModel) -> sqlx::Result<User> {
+async fn fill_user_response(
+    state: &AppState,
+    tx: &mut MySqlConnection,
+    user_model: UserModel,
+) -> sqlx::Result<User> {
     let theme_model: ThemeModel = sqlx::query_as("SELECT * FROM themes WHERE user_id = ?")
         .bind(user_model.id)
         .fetch_one(&mut *tx)
         .await?;
 
-    let image: Option<Vec<u8>> = sqlx::query_scalar("SELECT image FROM icons WHERE user_id = ?")
-        .bind(user_model.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let image = if let Some(image) = image {
-        image
-    } else {
-        tokio::fs::read(FALLBACK_IMAGE).await?
-    };
-    use sha2::digest::Digest as _;
-    let icon_hash = sha2::Sha256::digest(image);
+    let (_, hash) = state.get_image(user_model.id).await;
 
     Ok(User {
         id: user_model.id,
@@ -1740,7 +1758,7 @@ async fn fill_user_response(tx: &mut MySqlConnection, user_model: UserModel) -> 
             id: theme_model.id,
             dark_mode: theme_model.dark_mode,
         },
-        icon_hash: format!("{:x}", icon_hash),
+        icon_hash: format!("{:x}", hash),
     })
 }
 

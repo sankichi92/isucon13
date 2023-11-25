@@ -8,6 +8,11 @@ include_recipe 'rust::user' do
   user 'isucon'
 end
 
+directory '/var/icons' do
+  user 'isucon'
+  mode '755'
+end
+
 #execute 'rustup default stable' do
 #  user 'isucon'
 #end
