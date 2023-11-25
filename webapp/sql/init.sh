@@ -70,4 +70,4 @@ mysql -u"$ISUCON_DB_USER" \
 
 bash ../pdns/init_zone.sh 
 
-
+sudo truncate -s 0 /var/log/mysql/slow.log
