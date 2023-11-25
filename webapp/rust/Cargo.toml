@@ -11,6 +11,7 @@ axum-extra = { version = "0.8", features = ["cookie-signed", "cookie-key-expansi
 base64 = "0.21"
 bcrypt = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
+console-subscriber = "0.2.0"
 hyper = "0.14"
 listenfd = "1"
 num-traits = "0.2"
@@ -19,7 +20,7 @@ sha2 = "0.10"
 sqlx = { version = "0.7", default-features = false, features = ["macros", "runtime-tokio", "mysql", "rust_decimal"] }
 thiserror = "1"
 time = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "tracing"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.4", features = ["trace"] }
 tracing = "0.1"
