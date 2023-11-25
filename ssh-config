@@ -1,11 +1,11 @@
 Host isu1
-  HostName x.x.x.x
+  HostName 35.77.168.21
   User isucon
 
 Host isu2
-  HostName y.y.y.y
+  HostName 57.180.202.72
   User isucon
 
 Host isu3
-  HostName z.z.z.z
+  HostName 18.177.103.160
   User isucon
