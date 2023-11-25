@@ -17,6 +17,12 @@ end
 remote_directory '/etc/powerdns/pdns.d' do
   user 'root'
   mode '755'
-  notifies :restart, 'service[nginx]'
+  notifies :restart, 'service[pdns]'
   source 'files/etc/powerdns/pdns.d'
+end
+
+remote_file '/opt/init_zone_once.sh' do
+  user 'root'
+  mode '755'
+  notifies :restart, 'service[pdns]'
 end
