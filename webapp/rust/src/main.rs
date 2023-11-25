@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tokio::fs;
 use uuid::Uuid;
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 const DEFAULT_SESSION_ID_KEY: &str = "SESSIONID";
 const DEFUALT_SESSION_EXPIRES_KEY: &str = "EXPIRES";
 const DEFAULT_USER_ID_KEY: &str = "USERID";
@@ -141,7 +144,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info,tower_http=debug,axum::rejection=trace");
     }
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
+    let tokio_console_layer = console_subscriber::spawn();
+    tracing_subscriber::registry()
+        .with(tokio_console_layer)
+        .init();
 
     let pool = sqlx::mysql::MySqlPoolOptions::new()
         .connect_with(build_mysql_options())
