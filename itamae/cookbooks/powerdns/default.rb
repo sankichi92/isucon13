@@ -1,5 +1,3 @@
-package 'dnsdist'
-
 service 'pdns' do
   action :nothing
 end
